@@ -237,15 +237,20 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         me = await context.bot.get_me()
         buttons = []
+        lines = ["🔗 لینک فایل‌ها", "", "لینک هر فایل را می‌توانید کپی یا روی دکمه آن بزنید:", ""]
         for fid, name, cat_name in rows:
             category_label = cat_name or "بدون دسته‌بندی"
-            label = f"🔗 {(name or f'فایل {fid}')[:35]} | {category_label[:20]}"
+            display_name = (name or f"فایل {fid}").strip()
             url = f"https://t.me/{me.username}?start=file_{fid}"
-            buttons.append([InlineKeyboardButton(label, url=url)])
+            lines.append(f"📦 {display_name} | {category_label}")
+            lines.append(url)
+            lines.append("")
+            buttons.append([InlineKeyboardButton(f"🔗 {display_name[:40]}", url=url)])
         buttons.append([InlineKeyboardButton("🔙 مدیریت", callback_data="menu:admin")])
         await q.edit_message_text(
-            "🔗 لینک فایل‌ها\n\nروی هر فایل بزنید تا لینک مستقیم آن باز شود.\nهر کسی لینک را باز کند، مستقیماً فایل را از ربات دریافت می‌کند.",
+            "\n".join(lines),
             reply_markup=InlineKeyboardMarkup(buttons),
+            disable_web_page_preview=True,
         )
         return
 
