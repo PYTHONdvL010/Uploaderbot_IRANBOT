@@ -155,7 +155,7 @@ async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["pending_file"] = (media.file_id, file_name, media_type)
     context.user_data["state"] = "caption"
     await msg.reply_text(
-        "📝 کپشن می‌خواهی؟\n\nمتن کپشن را بفرست.\nاگر کپشن نمی‌خواهی، `0` بفرست."
+        "📝 کپشن فایل را ارسال کنید.\nاگر کپشن نمی‌خواهید، `0` بفرستید."
     )
 
 
@@ -185,8 +185,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         context.user_data["state"] = "upload_wait"
         await q.edit_message_text(
-            "📤 فایل مورد نظر را ارسال کنید.\n\n"
-            "هیچ محدودیت حجمی اضافه‌ای توسط ربات اعمال نمی‌شود؛ محدودیت واقعی Telegram Bot API ملاک است.",
+            "📤 فایل مورد نظر را ارسال کنید.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔙 مدیریت", callback_data="menu:admin")]
             ]),
