@@ -19,6 +19,11 @@ db.execute("""CREATE TABLE IF NOT EXISTS files(
     uploaded_by INTEGER,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(category_id) REFERENCES categories(id))""")
+
+# Keep existing databases compatible with the new file-type aware delivery.
+cols = {row[1] for row in db.execute("PRAGMA table_info(files)").fetchall()}
+if "media_type" not in cols:
+    db.execute("ALTER TABLE files ADD COLUMN media_type TEXT DEFAULT 'document'")
 db.commit()
 
 
@@ -33,6 +38,7 @@ def admin_kb():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📂 دسته‌بندی‌ها", callback_data="admin:categories"),
          InlineKeyboardButton("📤 آپلود", callback_data="admin:upload")],
+        [InlineKeyboardButton("🔗 لینک فایل‌ها", callback_data="admin:links")],
         [InlineKeyboardButton("📁 فایل‌های آپلود شده", callback_data="menu:files")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="menu:home")],
     ])
@@ -40,13 +46,43 @@ def admin_kb():
 
 def category_buttons(prefix="cat"):
     cats = db.execute("SELECT id,name FROM categories ORDER BY id DESC").fetchall()
-    buttons = [[InlineKeyboardButton(name, callback_data=f"{prefix}:{cid}")] for cid, name in cats]
-    return buttons
+    return [[InlineKeyboardButton(name, callback_data=f"{prefix}:{cid}")] for cid, name in cats]
+
+
+async def send_saved_file(bot, chat_id, telegram_file_id, media_type, caption=None):
+    kwargs = {"chat_id": chat_id, "caption": caption or None}
+    if media_type == "video":
+        return await bot.send_video(video=telegram_file_id, **kwargs)
+    if media_type == "audio":
+        return await bot.send_audio(audio=telegram_file_id, **kwargs)
+    return await bot.send_document(document=telegram_file_id, **kwargs)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
-    admin = update.effective_user.id in ADMINS
+    uid = update.effective_user.id
+    admin = uid in ADMINS
+
+    # Public file deep-link: https://t.me/BOT_USERNAME?start=file_<id>
+    if context.args and context.args[0].startswith("file_"):
+        try:
+            file_id = int(context.args[0].split("_", 1)[1])
+        except (ValueError, IndexError):
+            await update.message.reply_text("❌ لینک فایل نامعتبر است.")
+            return
+
+        row = db.execute(
+            "SELECT telegram_file_id, media_type, caption FROM files WHERE id=?",
+            (file_id,),
+        ).fetchone()
+        if not row:
+            await update.message.reply_text("❌ این فایل دیگر وجود ندارد یا لینک آن نامعتبر است.")
+            return
+
+        telegram_file_id, media_type, caption = row
+        await send_saved_file(update.get_bot(), update.effective_chat.id, telegram_file_id, media_type, caption)
+        return
+
     await update.message.reply_text(
         "سلام 👋\nبه ربات آپلودر خوش آمدید.",
         reply_markup=main_kb(admin),
@@ -62,7 +98,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     admin = uid in ADMINS
     state = context.user_data.get("state")
 
-    # Category name entry
     if state == "add_cat" and admin:
         if not t:
             await update.message.reply_text("لطفاً یک نام برای دسته‌بندی بفرست.")
@@ -79,15 +114,20 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ این دسته‌بندی قبلاً وجود دارد. یک نام دیگر بفرست.")
         return
 
-    # Caption entry
     if state == "caption" and admin:
         context.user_data["caption"] = "" if t == "0" else t
         cats = db.execute("SELECT id,name FROM categories ORDER BY id DESC").fetchall()
+        if not cats:
+            context.user_data.clear()
+            await update.message.reply_text(
+                "❌ هنوز هیچ دسته‌بندی‌ای ساخته نشده است.\nابتدا یک دسته‌بندی بسازید.",
+                reply_markup=admin_kb(),
+            )
+            return
         buttons = [[InlineKeyboardButton(name, callback_data=f"savecat:{cid}")] for cid, name in cats]
-        buttons.append([InlineKeyboardButton("🚫 بدون دسته‌بندی", callback_data="savecat:0")])
         context.user_data["state"] = "choose_cat"
         await update.message.reply_text(
-            "📂 کدام دسته‌بندی؟",
+            "📂 دسته‌بندی فایل را انتخاب کنید:",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
         return
@@ -101,11 +141,18 @@ async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     media = msg.document or msg.video or msg.audio
     if not media:
-        await msg.reply_text("لطفاً فایل را به‌صورت Document، Video یا Audio ارسال کنید.")
+        await msg.reply_text("❌ فایل مورد نظر را به‌صورت فایل، ویدیو یا صوت ارسال کنید.")
         return
 
+    if msg.document:
+        media_type = "document"
+    elif msg.video:
+        media_type = "video"
+    else:
+        media_type = "audio"
+
     file_name = getattr(media, "file_name", None) or f"file_{media.file_unique_id}"
-    context.user_data["pending_file"] = (media.file_id, file_name)
+    context.user_data["pending_file"] = (media.file_id, file_name, media_type)
     context.user_data["state"] = "caption"
     await msg.reply_text(
         "📝 کپشن می‌خواهی؟\n\nمتن کپشن را بفرست.\nاگر کپشن نمی‌خواهی، `0` بفرست."
@@ -138,8 +185,8 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         context.user_data["state"] = "upload_wait"
         await q.edit_message_text(
-            "📤 فایل را ارسال کنید.\n\n"
-            "محدودیت حجمی اضافه‌ای توسط ربات اعمال نمی‌شود و محدودیت واقعی Telegram Bot API ملاک است.",
+            "📤 فایل مورد نظر را ارسال کنید.\n\n"
+            "هیچ محدودیت حجمی اضافه‌ای توسط ربات اعمال نمی‌شود؛ محدودیت واقعی Telegram Bot API ملاک است.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔙 مدیریت", callback_data="menu:admin")]
             ]),
@@ -172,14 +219,44 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if data == "admin:links":
+        if not admin:
+            return
+        rows = db.execute(
+            "SELECT f.id, f.name, c.name FROM files f JOIN categories c ON c.id=f.category_id ORDER BY f.id DESC"
+        ).fetchall()
+        if not rows:
+            await q.edit_message_text(
+                "🔗 هنوز هیچ فایل دسته‌بندی‌شده‌ای برای ساخت لینک وجود ندارد.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 مدیریت", callback_data="menu:admin")]
+                ]),
+            )
+            return
+
+        me = await context.bot.get_me()
+        buttons = []
+        for fid, name, cat_name in rows:
+            label = f"🔗 {(name or f'فایل {fid}')[:35]} | {cat_name[:20]}"
+            url = f"https://t.me/{me.username}?start=file_{fid}"
+            buttons.append([InlineKeyboardButton(label, url=url)])
+        buttons.append([InlineKeyboardButton("🔙 مدیریت", callback_data="menu:admin")])
+        await q.edit_message_text(
+            "🔗 لینک فایل‌ها\n\nروی هر فایل بزنید تا لینک مستقیم آن باز شود.\nهر کسی لینک را باز کند، مستقیماً فایل را از ربات دریافت می‌کند.",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+        return
+
     if data == "menu:files":
         cats = db.execute("SELECT id,name FROM categories ORDER BY id").fetchall()
-        total = db.execute("SELECT COUNT(*) FROM files").fetchone()[0]
-        if total == 0:
-            await q.edit_message_text("📁 هیچ فایلی آپلود نشده است.", reply_markup=main_kb(admin))
+        total = db.execute("SELECT COUNT(*) FROM files WHERE category_id IS NOT NULL").fetchone()[0]
+        if total == 0 or not cats:
+            await q.edit_message_text(
+                "📁 هنوز هیچ فایل دسته‌بندی‌شده‌ای آپلود نشده است.",
+                reply_markup=main_kb(admin),
+            )
             return
         buttons = [[InlineKeyboardButton(name, callback_data=f"cat:{cid}")] for cid, name in cats]
-        buttons.append([InlineKeyboardButton("📁 بدون دسته‌بندی", callback_data="cat:0")])
         buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="menu:home")])
         await q.edit_message_text("📂 دسته‌بندی را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(buttons))
         return
@@ -193,22 +270,27 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text("❌ فایل در انتظار پیدا نشد.", reply_markup=admin_kb())
             context.user_data.clear()
             return
-        fid, name = pending
+        fid, name, media_type = pending
         cap = context.user_data.get("caption", "")
+        exists = db.execute("SELECT id FROM categories WHERE id=?", (cid,)).fetchone()
+        if not exists:
+            await q.edit_message_text("❌ این دسته‌بندی دیگر وجود ندارد.", reply_markup=admin_kb())
+            context.user_data.clear()
+            return
         db.execute(
-            "INSERT INTO files(telegram_file_id,name,caption,category_id,uploaded_by) VALUES(?,?,?,?,?)",
-            (fid, name, cap, cid or None, uid),
+            "INSERT INTO files(telegram_file_id,name,caption,category_id,uploaded_by,media_type) VALUES(?,?,?,?,?,?)",
+            (fid, name, cap, cid, uid, media_type),
         )
         db.commit()
         context.user_data.clear()
-        await q.edit_message_text("✅ فایل با موفقیت آپلود و ثبت شد.", reply_markup=admin_kb())
+        await q.edit_message_text("✅ فایل با موفقیت آپلود و در دسته‌بندی ثبت شد.", reply_markup=admin_kb())
         return
 
     if data.startswith("cat:"):
         cid = int(data.split(":", 1)[1])
         rows = db.execute(
-            "SELECT id,name,telegram_file_id,caption FROM files WHERE category_id IS ? ORDER BY id DESC",
-            (cid or None,),
+            "SELECT id,name,telegram_file_id,caption,media_type FROM files WHERE category_id=? ORDER BY id DESC",
+            (cid,),
         ).fetchall()
         if not rows:
             await q.edit_message_text(
@@ -216,9 +298,12 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 دسته‌بندی‌ها", callback_data="menu:files")]]),
             )
             return
-        buttons = [[InlineKeyboardButton((name or f"فایل {fid}")[:50], callback_data=f"file:{fid}")] for fid, name, _, _ in rows]
+        buttons = [[InlineKeyboardButton((name or f"فایل {fid}")[:50], callback_data=f"file:{fid}")] for fid, name, _, _, _ in rows]
         buttons.append([InlineKeyboardButton("🔙 دسته‌بندی‌ها", callback_data="menu:files")])
-        context.user_data["browse"] = {fid: (telegram_fid, name, caption) for fid, name, telegram_fid, caption in rows}
+        context.user_data["browse"] = {
+            fid: (telegram_fid, name, caption, media_type)
+            for fid, name, telegram_fid, caption, media_type in rows
+        }
         await q.edit_message_text("📄 فایل‌ها:", reply_markup=InlineKeyboardMarkup(buttons))
         return
 
@@ -226,10 +311,16 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         fid = int(data.split(":", 1)[1])
         item = context.user_data.get("browse", {}).get(fid)
         if not item:
-            await q.answer("فایل پیدا نشد. دوباره دسته‌بندی را باز کنید.", show_alert=True)
-            return
-        telegram_fid, name, cap = item
-        await context.bot.send_document(q.message.chat_id, telegram_fid, caption=cap or None)
+            row = db.execute(
+                "SELECT telegram_file_id,name,caption,media_type FROM files WHERE id=?",
+                (fid,),
+            ).fetchone()
+            if not row:
+                await q.answer("فایل پیدا نشد.", show_alert=True)
+                return
+            item = row
+        telegram_fid, name, cap, media_type = item
+        await send_saved_file(context.bot, q.message.chat_id, telegram_fid, media_type, cap)
         return
 
     if data.startswith("noop:"):
@@ -247,9 +338,6 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(callback))
-    # One text handler only: the previous version registered caption_handler
-    # before text_handler, which intercepted every text update and made the
-    # normal menu appear unresponsive.
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     app.add_handler(MessageHandler(filters.Document.ALL | filters.VIDEO | filters.AUDIO, file_handler))
     app.add_error_handler(error)
