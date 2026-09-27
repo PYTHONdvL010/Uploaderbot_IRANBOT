@@ -1,4 +1,4 @@
-import os, sqlite3, asyncio
+import os, sqlite3
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
@@ -120,15 +120,22 @@ async def callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
 
 async def error(update,context): print("ERROR:",context.error)
 
-async def main():
-    if not BOT_TOKEN: raise RuntimeError("BOT_TOKEN is not set")
-    app=Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start",start))
-    app.add_handler(CallbackQueryHandler(callback))
-    app.add_handler(MessageHandler(filters.Document.ALL|filters.VIDEO|filters.AUDIO,file_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,caption_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,text_handler))
-    app.add_error_handler(error)
-    await app.run_polling()
+def main():
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN is not set")
 
-if __name__=="__main__": asyncio.run(main())
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(callback))
+    app.add_handler(MessageHandler(filters.Document.ALL | filters.VIDEO | filters.AUDIO, file_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, caption_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+    app.add_error_handler(error)
+
+    # run_polling() manages the asyncio event loop itself.
+    # Do not wrap it in asyncio.run(), otherwise Railway gets
+    # "This event loop is already running".
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
