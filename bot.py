@@ -125,6 +125,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         buttons = [[InlineKeyboardButton(name, callback_data=f"savecat:{cid}")] for cid, name in cats]
+        # A file may also be stored without any category.
+        buttons.append([InlineKeyboardButton("📦 بدون دسته‌بندی", callback_data="savecat:0")])
         context.user_data["state"] = "choose_cat"
         await update.message.reply_text(
             "📂 دسته‌بندی فایل را انتخاب کنید:",
@@ -222,11 +224,11 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not admin:
             return
         rows = db.execute(
-            "SELECT f.id, f.name, c.name FROM files f JOIN categories c ON c.id=f.category_id ORDER BY f.id DESC"
+            "SELECT f.id, f.name, c.name FROM files f LEFT JOIN categories c ON c.id=f.category_id ORDER BY f.id DESC"
         ).fetchall()
         if not rows:
             await q.edit_message_text(
-                "🔗 هنوز هیچ فایل دسته‌بندی‌شده‌ای برای ساخت لینک وجود ندارد.",
+                "🔗 هنوز هیچ فایلی برای ساخت لینک وجود ندارد.",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔙 مدیریت", callback_data="menu:admin")]
                 ]),
@@ -236,7 +238,8 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         me = await context.bot.get_me()
         buttons = []
         for fid, name, cat_name in rows:
-            label = f"🔗 {(name or f'فایل {fid}')[:35]} | {cat_name[:20]}"
+            category_label = cat_name or "بدون دسته‌بندی"
+            label = f"🔗 {(name or f'فایل {fid}')[:35]} | {category_label[:20]}"
             url = f"https://t.me/{me.username}?start=file_{fid}"
             buttons.append([InlineKeyboardButton(label, url=url)])
         buttons.append([InlineKeyboardButton("🔙 مدیریت", callback_data="menu:admin")])
@@ -248,16 +251,25 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "menu:files":
         cats = db.execute("SELECT id,name FROM categories ORDER BY id").fetchall()
-        total = db.execute("SELECT COUNT(*) FROM files WHERE category_id IS NOT NULL").fetchone()[0]
-        if total == 0 or not cats:
+        uncategorized = db.execute(
+            "SELECT id,name FROM files WHERE category_id IS NULL ORDER BY id DESC"
+        ).fetchall()
+        total = db.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+        if total == 0:
             await q.edit_message_text(
-                "📁 هنوز هیچ فایل دسته‌بندی‌شده‌ای آپلود نشده است.",
+                "📁 هنوز هیچ فایلی آپلود نشده است.",
                 reply_markup=main_kb(admin),
             )
             return
+
         buttons = [[InlineKeyboardButton(name, callback_data=f"cat:{cid}")] for cid, name in cats]
+        # Uncategorized files appear directly under the categories.
+        buttons.extend(
+            [InlineKeyboardButton(f"📄 {name or f'فایل {fid}'}", callback_data=f"file:{fid}")]
+            for fid, name in uncategorized
+        )
         buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="menu:home")])
-        await q.edit_message_text("📂 دسته‌بندی را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(buttons))
+        await q.edit_message_text("📂 فایل‌ها:", reply_markup=InlineKeyboardMarkup(buttons))
         return
 
     if data.startswith("savecat:"):
@@ -271,14 +283,16 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         fid, name, media_type = pending
         cap = context.user_data.get("caption", "")
-        exists = db.execute("SELECT id FROM categories WHERE id=?", (cid,)).fetchone()
-        if not exists:
-            await q.edit_message_text("❌ این دسته‌بندی دیگر وجود ندارد.", reply_markup=admin_kb())
-            context.user_data.clear()
-            return
+        if cid != 0:
+            exists = db.execute("SELECT id FROM categories WHERE id=?", (cid,)).fetchone()
+            if not exists:
+                await q.edit_message_text("❌ این دسته‌بندی دیگر وجود ندارد.", reply_markup=admin_kb())
+                context.user_data.clear()
+                return
+        category_id = None if cid == 0 else cid
         db.execute(
             "INSERT INTO files(telegram_file_id,name,caption,category_id,uploaded_by,media_type) VALUES(?,?,?,?,?,?)",
-            (fid, name, cap, cid, uid, media_type),
+            (fid, name, cap, category_id, uid, media_type),
         )
         db.commit()
         context.user_data.clear()
