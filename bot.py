@@ -1,325 +1,134 @@
-import asyncio
-import os
-import sqlite3
-import tempfile
-from pathlib import Path
+import os, sqlite3, asyncio
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
-from telethon import TelegramClient, events, Button
-from telethon.tl.custom import Message
+DB_PATH=os.getenv("DB_PATH","/app/data/uploader.db")
+BOT_TOKEN=os.getenv("BOT_TOKEN","").strip()
+ADMINS={int(x.strip()) for x in os.getenv("ADMIN_IDS","").split(",") if x.strip().isdigit()}
 
-# Telegram's public API ID/hash are used by the client library.
-# These are public application credentials used by many Telegram clients.
-API_ID = 2040
-API_HASH = "b18441a1e2b9c2f1c3e5d4a6b7c8d9e0"
-
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-DB_PATH = os.getenv("DB_PATH", "/app/data/uploader.db").strip()
-ADMIN_IDS = {
-    int(x.strip()) for x in os.getenv("ADMIN_IDS", "").replace(" ", "").split(",")
-    if x.strip().lstrip("-").isdigit()
-}
-
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is required")
-
-Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
-
-db = sqlite3.connect(DB_PATH, check_same_thread=False)
-db.row_factory = sqlite3.Row
-db.execute("""CREATE TABLE IF NOT EXISTS categories (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
-)""")
-db.execute("""CREATE TABLE IF NOT EXISTS uploads (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    owner_id INTEGER NOT NULL,
-    source_chat_id INTEGER NOT NULL,
-    source_message_id INTEGER NOT NULL,
-    file_name TEXT,
-    file_size INTEGER,
-    caption TEXT,
-    category_id INTEGER,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(category_id) REFERENCES categories(id)
-)""")
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+db=sqlite3.connect(DB_PATH, check_same_thread=False)
+db.execute("CREATE TABLE IF NOT EXISTS categories(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE NOT NULL)")
+db.execute("""CREATE TABLE IF NOT EXISTS files(
+ id INTEGER PRIMARY KEY AUTOINCREMENT, telegram_file_id TEXT NOT NULL,
+ name TEXT, caption TEXT, category_id INTEGER, uploaded_by INTEGER,
+ created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+ FOREIGN KEY(category_id) REFERENCES categories(id))""")
 db.commit()
 
-client = TelegramClient("uploader_bot", API_ID, API_HASH)
+def main_kb(admin=False):
+    rows=[[KeyboardButton("📁 فایل‌های آپلود شده")]]
+    if admin: rows.append([KeyboardButton("⚙️ مدیریت")])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
-# Per-user temporary state. Persistent data is only categories/uploads.
-states = {}
+def admin_kb():
+    return ReplyKeyboardMarkup([
+        [KeyboardButton("📂 دسته‌بندی‌ها"),KeyboardButton("📤 آپلود")],
+        [KeyboardButton("📁 فایل‌های آپلود شده")],
+        [KeyboardButton("🔙 بازگشت")]
+    ], resize_keyboard=True)
 
-MAIN_BUTTON = "📁 فایل‌های آپلود شده"
-ADMIN_BUTTON = "⚙️ مدیریت"
+async def start(update:Update, context:ContextTypes.DEFAULT_TYPE):
+    admin=update.effective_user.id in ADMINS
+    await update.message.reply_text("سلام 👋\nبه ربات آپلودر خوش آمدید.", reply_markup=main_kb(admin))
 
-def is_admin(uid):
-    return uid in ADMIN_IDS
-
-def main_keyboard(uid):
-    rows = [[Button.text(MAIN_BUTTON)]]
-    if is_admin(uid):
-        rows.append([Button.text(ADMIN_BUTTON)])
-    return rows
-
-def admin_keyboard():
-    return [
-        [Button.text("📂 دسته‌بندی‌ها"), Button.text("📤 Upload")],
-        [Button.text("🔙 بازگشت")]
-    ]
-
-def category_keyboard(categories, include_none=True):
-    rows = []
-    for c in categories:
-        rows.append([Button.inline(c["name"], data=f"cat:{c['id']}")])
-    if include_none:
-        rows.append([Button.inline("بدون دسته‌بندی", data="cat:0")])
-    rows.append([Button.inline("🔙 بازگشت", data="back_admin")])
-    return rows
-
-def human_size(n):
-    if not n:
-        return "0 B"
-    units = ["B", "KB", "MB", "GB", "TB"]
-    i = 0
-    x = float(n)
-    while x >= 1024 and i < len(units)-1:
-        x /= 1024
-        i += 1
-    return f"{x:.2f} {units[i]}"
-
-def get_categories():
-    return db.execute("SELECT * FROM categories ORDER BY id DESC").fetchall()
-
-@client.on(events.NewMessage(pattern="/start"))
-async def start(event):
-    uid = event.sender_id
-    states.pop(uid, None)
-    text = "سلام 👋\nبه ربات آپلودر خوش اومدی."
-    if is_admin(uid):
-        text += "\n\nشما به بخش مدیریت دسترسی دارید."
-    await event.respond(text, buttons=main_keyboard(uid))
-
-@client.on(events.NewMessage)
-async def text_handler(event):
-    if not event.is_private or event.raw_text.startswith("/"):
-        return
-
-    uid = event.sender_id
-    text = event.raw_text.strip()
-
-    if text == MAIN_BUTTON:
-        cats = get_categories()
-        if not cats:
-            await event.respond("📂 هیچ محصول و دسته‌بندی‌ای وجود ندارد.", buttons=main_keyboard(uid))
-            return
-        rows = [[Button.inline(c["name"], data=f"browse:{c['id']}")] for c in cats]
-        rows.append([Button.inline("بدون دسته‌بندی", data="browse:0")])
-        await event.respond("📁 دسته‌بندی موردنظر را انتخاب کن:", buttons=rows)
-        return
-
-    if text == ADMIN_BUTTON and is_admin(uid):
-        states.pop(uid, None)
-        await event.respond("⚙️ بخش مدیریت:", buttons=admin_keyboard())
-        return
-
-    if text == "🔙 بازگشت":
-        states.pop(uid, None)
-        await event.respond("منوی اصلی:", buttons=main_keyboard(uid))
-        return
-
-    if not is_admin(uid):
-        return
-
-    state = states.get(uid)
-
-    if text == "📂 دسته‌بندی‌ها":
-        cats = get_categories()
-        msg = "📂 دسته‌بندی‌ها\n\n"
-        if not cats:
-            msg += "دسته‌بندی خالی است."
+async def text_handler(update:Update, context:ContextTypes.DEFAULT_TYPE):
+    if not update.message: return
+    t=update.message.text
+    uid=update.effective_user.id
+    admin=uid in ADMINS
+    if t=="⚙️ مدیریت" and admin:
+        context.user_data.clear(); context.user_data["state"]="admin"
+        await update.message.reply_text("⚙️ مدیریت",reply_markup=admin_kb()); return
+    if t=="🔙 بازگشت":
+        context.user_data.clear()
+        await update.message.reply_text("منوی اصلی",reply_markup=main_kb(admin)); return
+    if t=="📂 دسته‌بندی‌ها" and admin:
+        context.user_data["state"]="cat_menu"
+        cur=db.execute("SELECT id,name FROM categories ORDER BY id DESC")
+        cats=cur.fetchall()
+        if not cats: await update.message.reply_text("دسته‌بندی خالی است.")
         else:
-            msg += "\n".join(f"• {c['name']}" for c in cats)
-        msg += "\n\nبرای ساخت دسته‌بندی جدید /addcat را بزن."
-        await event.respond(msg, buttons=admin_keyboard())
-        return
-
-    if text == "📤 Upload":
-        states[uid] = {"step": "wait_file"}
-        await event.respond(
-            "📤 فایل را ارسال کن.\n\n"
-            "حداکثر حجم: 2 GB\n"
-            "فایل‌های بزرگ‌تر از این مقدار تأیید نمی‌شوند."
-        )
-        return
-
-    if text == "/addcat":
-        states[uid] = {"step": "cat_name"}
-        await event.respond("✏️ اسم دسته‌بندی را ارسال کن:")
-        return
-
-    if state and state.get("step") == "cat_name":
-        name = text
+            await update.message.reply_text("دسته‌بندی‌های ساخته‌شده:\n" + "\n".join(f"• {n}" for _,n in cats))
+        await update.message.reply_text("برای ساخت دسته‌بندی، نام آن را ارسال کنید."); context.user_data["state"]="add_cat"; return
+    if t=="📤 آپلود" and admin:
+        context.user_data.clear(); context.user_data["state"]="upload_wait"
+        await update.message.reply_text("📤 فایل را ارسال کنید.\n\nمحدودیت حجمی توسط محدودیت واقعی Telegram Bot API تعیین می‌شود و ربات محدودیت اضافه‌ای اعمال نمی‌کند."); return
+    if t=="📁 فایل‌های آپلود شده":
+        cur=db.execute("""SELECT f.id,f.name,c.name FROM files f LEFT JOIN categories c ON c.id=f.category_id ORDER BY f.id DESC""")
+        rows=cur.fetchall()
+        if not rows:
+            await update.message.reply_text("هیچ محصول و دسته‌بندی وجود ندارد."); return
+        cats=db.execute("SELECT id,name FROM categories ORDER BY id").fetchall()
+        buttons=[[InlineKeyboardButton(n,callback_data=f"cat:{i}")] for i,n in cats]
+        buttons.append([InlineKeyboardButton("بدون دسته‌بندی",callback_data="cat:0")])
+        await update.message.reply_text("دسته‌بندی را انتخاب کنید:",reply_markup=InlineKeyboardMarkup(buttons)); return
+    st=context.user_data.get("state")
+    if st=="add_cat" and admin:
+        name=t.strip()
+        if not name: return
         try:
-            db.execute("INSERT INTO categories(name) VALUES (?)", (name,))
-            db.commit()
-            states.pop(uid, None)
-            await event.respond(f"✅ دسته‌بندی «{name}» با موفقیت اضافه شد.", buttons=admin_keyboard())
+            db.execute("INSERT INTO categories(name) VALUES(?)",(name,)); db.commit()
+            await update.message.reply_text(f"دسته‌بندی «{name}» با موفقیت اضافه شد.",reply_markup=admin_kb())
         except sqlite3.IntegrityError:
-            await event.respond("⚠️ این دسته‌بندی قبلاً وجود دارد. یک نام دیگر بفرست.")
+            await update.message.reply_text("این دسته‌بندی قبلاً وجود دارد.")
+        context.user_data["state"]="admin"
+
+async def file_handler(update:Update, context:ContextTypes.DEFAULT_TYPE):
+    uid=update.effective_user.id
+    if uid not in ADMINS or context.user_data.get("state")!="upload_wait": return
+    msg=update.message
+    media=msg.document or msg.video or msg.audio
+    if not media:
+        await msg.reply_text("لطفاً فایل را به‌صورت Document/Video/Audio ارسال کنید."); return
+    context.user_data["pending_file"]=(media.file_id, media.file_name if hasattr(media,"file_name") else None)
+    context.user_data["state"]="caption"
+    await msg.reply_text("کپشن می‌خواهی؟\nاگر بله، متن کپشن را بفرست. اگر نمی‌خواهی، `0` بفرست.")
+
+async def caption_handler(update:Update, context:ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMINS or context.user_data.get("state")!="caption": return
+    text=update.message.text
+    context.user_data["caption"]="" if text=="0" else text
+    cats=db.execute("SELECT id,name FROM categories ORDER BY id").fetchall()
+    buttons=[[InlineKeyboardButton(n,callback_data=f"savecat:{i}")] for i,n in cats]
+    buttons.append([InlineKeyboardButton("بدون دسته‌بندی",callback_data="savecat:0")])
+    context.user_data["state"]="choose_cat"
+    await update.message.reply_text("دسته‌بندی را انتخاب کن:",reply_markup=InlineKeyboardMarkup(buttons))
+
+async def callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
+    q=update.callback_query; await q.answer()
+    uid=q.from_user.id
+    if uid not in ADMINS and not q.data.startswith("cat:"): return
+    if q.data.startswith("savecat:"):
+        cid=int(q.data.split(":")[1]); fid,name=context.user_data["pending_file"]; cap=context.user_data.get("caption","")
+        db.execute("INSERT INTO files(telegram_file_id,name,caption,category_id,uploaded_by) VALUES(?,?,?,?,?)",(fid,name,cap,cid or None,uid)); db.commit()
+        context.user_data.clear()
+        await q.edit_message_text("✅ فایل با موفقیت آپلود و ثبت شد."); return
+    if q.data.startswith("cat:"):
+        cid=int(q.data.split(":")[1])
+        rows=db.execute("SELECT id,name,telegram_file_id,caption FROM files WHERE category_id IS ? ORDER BY id DESC",(cid or None,)).fetchall()
+        if not rows: await q.edit_message_text("این دسته‌بندی خالی است."); return
+        buttons=[[InlineKeyboardButton((n or f"فایل {i}")[:50],callback_data=f"file:{i}")] for i,n,_,_ in rows]
+        context.user_data["browse"]={i:(fid,n,cap) for i,n,fid,cap in rows}
+        await q.edit_message_text("فایل‌ها:",reply_markup=InlineKeyboardMarkup(buttons)); return
+    if q.data.startswith("file:"):
+        i=int(q.data.split(":")[1]); item=context.user_data.get("browse",{}).get(i)
+        if not item: await q.answer("فایل پیدا نشد.",show_alert=True); return
+        fid,n,cap=item
+        await context.bot.send_document(q.message.chat_id,fid,caption=cap or None)
         return
 
-    if state and state.get("step") == "caption":
-        if text == "0":
-            caption = ""
-        else:
-            caption = text
-        states[uid]["caption"] = caption
-        states[uid]["step"] = "category"
-        cats = get_categories()
-        if cats:
-            await event.respond(
-                "📂 کدوم دسته‌بندی؟",
-                buttons=category_keyboard(cats)
-            )
-        else:
-            await event.respond(
-                "⚠️ هنوز هیچ دسته‌بندی‌ای ساخته نشده.\n"
-                "آپلود بدون دسته‌بندی انجام می‌شود.",
-                buttons=[[Button.inline("بدون دسته‌بندی", data="cat:0")]]
-            )
-        return
-
-@client.on(events.NewMessage)
-async def file_handler(event):
-    if not event.is_private or not event.message.media:
-        return
-    uid = event.sender_id
-    if not is_admin(uid):
-        return
-    state = states.get(uid)
-    if not state or state.get("step") != "wait_file":
-        return
-
-    msg = event.message
-    size = getattr(msg.file, "size", None) or 0
-    if size > 2 * 1024 * 1024 * 1024:
-        await event.respond("❌ حجم فایل بیشتر از سقف 2 GB است و تأیید نمی‌شود.")
-        return
-
-    name = msg.file.name or f"file_{msg.id}"
-    states[uid] = {
-        "step": "caption",
-        "source_chat_id": event.chat_id,
-        "source_message_id": msg.id,
-        "file_name": name,
-        "file_size": size,
-    }
-    await event.respond(
-        f"✅ فایل دریافت شد.\n"
-        f"📄 نام: {name}\n"
-        f"📦 حجم: {human_size(size)}\n\n"
-        "کپشن می‌خواهی؟\n"
-        "اگر 0 بفرستی، بدون کپشن ذخیره می‌شود.\n"
-        "هر متنی بفرستی همان به‌عنوان کپشن ثبت می‌شود."
-    )
-
-@client.on(events.CallbackQuery)
-async def callbacks(event):
-    uid = event.sender_id
-    data = event.data.decode()
-
-    if data == "back_admin":
-        await event.edit("⚙️ بخش مدیریت:", buttons=admin_keyboard())
-        return
-
-    if data.startswith("cat:") and is_admin(uid):
-        cat_id = int(data.split(":")[1])
-        state = states.get(uid)
-        if not state or state.get("step") != "category":
-            await event.answer("این مرحله منقضی شده.", alert=True)
-            return
-
-        caption = state.get("caption", "")
-        category_id = cat_id if cat_id else None
-        db.execute(
-            """INSERT INTO uploads
-               (owner_id, source_chat_id, source_message_id, file_name, file_size, caption, category_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (uid, state["source_chat_id"], state["source_message_id"],
-             state["file_name"], state["file_size"], caption, category_id)
-        )
-        db.commit()
-        states.pop(uid, None)
-
-        if category_id:
-            c = db.execute("SELECT name FROM categories WHERE id=?", (category_id,)).fetchone()
-            msg = f"✅ فایل با موفقیت آپلود شد.\n📂 دسته‌بندی: {c['name']}"
-        else:
-            msg = "✅ فایل با موفقیت آپلود شد.\n📂 بدون دسته‌بندی"
-
-        await event.edit(msg, buttons=admin_keyboard())
-        return
-
-    if data.startswith("browse:"):
-        cat_id = int(data.split(":")[1])
-        if cat_id:
-            c = db.execute("SELECT * FROM categories WHERE id=?", (cat_id,)).fetchone()
-            if not c:
-                await event.answer("دسته‌بندی پیدا نشد.", alert=True)
-                return
-            uploads = db.execute(
-                "SELECT * FROM uploads WHERE category_id=? ORDER BY id DESC", (cat_id,)
-            ).fetchall()
-            title = f"📂 {c['name']}"
-        else:
-            uploads = db.execute(
-                "SELECT * FROM uploads WHERE category_id IS NULL ORDER BY id DESC"
-            ).fetchall()
-            title = "📂 بدون دسته‌بندی"
-
-        if not uploads:
-            await event.edit(f"{title}\n\nهیچ فایلی در این دسته وجود ندارد.")
-            return
-
-        rows = []
-        for u in uploads:
-            label = u["file_name"] or f"File #{u['id']}"
-            if len(label) > 50:
-                label = label[:47] + "..."
-            rows.append([Button.inline(label, data=f"file:{u['id']}")])
-        await event.edit(title, buttons=rows)
-        return
-
-    if data.startswith("file:"):
-        file_id = int(data.split(":")[1])
-        u = db.execute("SELECT * FROM uploads WHERE id=?", (file_id,)).fetchone()
-        if not u:
-            await event.answer("فایل پیدا نشد.", alert=True)
-            return
-
-        await event.answer("در حال ارسال فایل...")
-        caption = u["caption"] or ""
-        try:
-            source = await client.get_messages(u["source_chat_id"], ids=u["source_message_id"])
-            if not source:
-                raise RuntimeError("source message unavailable")
-            await client.send_file(
-                uid,
-                source,
-                caption=caption
-            )
-        except Exception as exc:
-            await event.answer("ارسال فایل انجام نشد.", alert=True)
-            print("send error:", repr(exc))
-        return
+async def error(update,context): print("ERROR:",context.error)
 
 async def main():
-    await client.start(bot_token=BOT_TOKEN)
-    me = await client.get_me()
-    print(f"Uploader bot started: @{me.username}")
-    print(f"Admins: {sorted(ADMIN_IDS)}")
-    await client.run_until_disconnected()
+    if not BOT_TOKEN: raise RuntimeError("BOT_TOKEN is not set")
+    app=Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start",start))
+    app.add_handler(CallbackQueryHandler(callback))
+    app.add_handler(MessageHandler(filters.Document.ALL|filters.VIDEO|filters.AUDIO,file_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,caption_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,text_handler))
+    app.add_error_handler(error)
+    await app.run_polling()
 
-if __name__ == "__main__":
-    asyncio.run(main())
+if __name__=="__main__": asyncio.run(main())
