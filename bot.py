@@ -111,7 +111,7 @@ def main_kb(admin=False):
 def admin_kb():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📂 دسته‌بندی‌ها", callback_data="admin:categories"),
-         InlineKeyboardButton("📦 محصولات", callback_data="admin:products")],
+         InlineKeyboardButton("📁 فایل ها", callback_data="admin:products")],
         [InlineKeyboardButton("📤 آپلود", callback_data="admin:upload"),
          InlineKeyboardButton("🔗 لینک فایل‌ها", callback_data="admin:links")],
         [InlineKeyboardButton("👥 کاربران", callback_data="admin:users"),
