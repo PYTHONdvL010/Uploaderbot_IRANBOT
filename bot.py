@@ -2,7 +2,6 @@ import os
 import re
 import sqlite3
 from html import escape
-
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -489,7 +488,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         rows = db.execute("SELECT f.id,f.name,c.name FROM files f LEFT JOIN categories c ON c.id=f.category_id ORDER BY f.id DESC").fetchall()
         if not rows:
-            await q.edit_message_text("📦 هنوز محصول/فایلی ثبت نشده است.", reply_markup=cancel_kb())
+            await q.edit_message_text("هوز فایل نیست 📁", reply_markup=cancel_kb())
             return
         buttons = [[InlineKeyboardButton(f"🗑 {((name or f'فایل {fid}')[:38])}", callback_data=f"delprodask:{fid}")] for fid, name, _ in rows]
         buttons.append([InlineKeyboardButton("🔙 مدیریت", callback_data="menu:admin")])
