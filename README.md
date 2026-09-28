@@ -204,30 +204,6 @@
 
 ---
 
-# 🧩 راه‌اندازی سریع
-
-### 🚀 با Railway
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/J5p8kF?referralCode=txNB5I&utm_medium=integration&utm_source=template&utm_campaign=generic)
-
-### 🛠️ نصب دستی
-
-```text
-Fork
- ↓
-Railway
- ↓
-ساخت فضای ذخیره‌سازی
- ↓
-/app/data
- ↓
-BOT_TOKEN
-ADMIN_IDS
-DB_PATH
- ↓
-Deploy
-```
-
----
 
 # ❗ نکات مهم
 
